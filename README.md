@@ -48,10 +48,10 @@ python src/train.py
 # 6. Evaluate
 python src/evaluate.py
 
-# 7. REAL-TIME webcam demo (PRIMARY FEATURE)
-python src/webcam.py
+# 7. REAL-TIME Local System Camera (High FPS OpenCV Native Window)
+python app.py --local
 
-# 8. Gradio web app (live browser webcam + upload + Grad-CAM)
+# 8. Public Gradio Web Application (Browser Webcam + Public Share URL)
 python app.py
 
 # 9. Predict on a single image
@@ -287,12 +287,19 @@ Grad-CAM (Gradient-weighted Class Activation Mapping) produces a heatmap showing
 
 **Important caveat:** Grad-CAM shows *where the model looks*, not what biologically causes the emotion. A heatmap on the mouth for "Happy" means the model used mouth features for its decision — it does NOT prove the mouth causes happiness.
 
-## Gradio Web Application (`app.py`)
+## Application Execution Modes (`app.py`)
 
+### 1. Local Native Camera Execution (`--local` / `-l`)
+```bash
+python app.py --local
+```
+- Launches the native system camera (`cv2.VideoCapture(0)`) in an OpenCV window.
+- Provides 60 FPS real-time emotion recognition with 0ms network latency.
+
+### 2. Public Gradio Web Application (Default)
 ```bash
 python app.py
 ```
-
 Opens `http://127.0.0.1:7860` (and generates a free public `.gradio.live` link) with 4 tabs:
 
 | Tab | Function |

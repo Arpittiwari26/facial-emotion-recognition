@@ -195,7 +195,7 @@ def run_webcam(
                     continue
 
                 face_input = preprocess_face(face_crop)
-                probs = model.predict(face_input, verbose=0)[0]
+                probs = model(face_input, training=False).numpy()[0]
                 pred_idx = int(np.argmax(probs))
                 raw_emotion = EMOTION_LABELS[pred_idx]
                 raw_confidence = float(probs[pred_idx])

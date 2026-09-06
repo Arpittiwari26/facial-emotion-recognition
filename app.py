@@ -10,6 +10,7 @@ Compatible with Hugging Face Spaces.
 
 from __future__ import annotations
 
+import argparse
 import io
 import sys
 import time
@@ -75,21 +76,24 @@ last_frame_time = [time.time()]
 
 
 # ── 1. Live Stream Handler ────────────────────────────────────────────
-def predict_live_stream(frame_rgb: np.ndarray | None, enable_stream: bool = True):
+def predict_live_stream(frame_rgb: np.ndarray | dict | None, enable_stream: bool = True):
     """
     Process continuous browser webcam frames with ultra-fast inference & exception safety.
-    Inputs: frame_rgb (numpy array from browser webcam), enable_stream (bool).
+    Inputs: frame_rgb (numpy array or dict from browser webcam), enable_stream (bool).
     Returns: (annotated_frame_rgb, emotion_probabilities_dict, status_fps_str)
     """
     if not enable_stream:
         return None, {"Stream paused": 1.0}, "Stream paused. Check 'Enable Live Webcam Streaming' to resume."
 
     try:
-        if frame_rgb is None or frame_rgb.size == 0:
-            return None, {"No face detected": 1.0}, "0.0 FPS | Waiting for browser camera..."
+        if isinstance(frame_rgb, dict):
+            frame_rgb = frame_rgb.get("composite") or frame_rgb.get("background") or frame_rgb.get("image")
+
+        if frame_rgb is None or not isinstance(frame_rgb, np.ndarray) or frame_rgb.size == 0:
+            return None, {"Waiting...": 1.0}, "0.0 FPS | Waiting for browser camera..."
 
         if model is None:
-            return frame_rgb, {"Model missing": 1.0}, "Error: Model file not loaded."
+            return None, {"Model missing": 1.0}, "Error: Model file not loaded."
 
         now = time.time()
         dt = now - last_frame_time[0]
@@ -168,20 +172,23 @@ def predict_live_stream(frame_rgb: np.ndarray | None, enable_stream: bool = True
         return annotated_rgb, summary_probs, status_str
     except Exception as e:
         print(f"[predict_live_stream error] {e}")
-        return frame_rgb, {"Streaming...": 1.0}, "Streaming..."
+        return None, {"Streaming...": 1.0}, f"Streaming status: {e}"
 
 
 # ── 2. Upload Image Handler ───────────────────────────────────────────
-def predict_uploaded_image(image_rgb: np.ndarray | None):
+def predict_uploaded_image(image_rgb: np.ndarray | dict | None):
     """
     Process single uploaded image.
     Returns: (annotated_image_rgb, emotion_probabilities_dict, status_str)
     """
-    if image_rgb is None or image_rgb.size == 0:
+    if isinstance(image_rgb, dict):
+        image_rgb = image_rgb.get("composite") or image_rgb.get("background") or image_rgb.get("image")
+
+    if image_rgb is None or not isinstance(image_rgb, np.ndarray) or image_rgb.size == 0:
         return None, {}, "Please upload an image."
 
     if model is None:
-        return image_rgb, {}, "Error: Model file not loaded."
+        return None, {}, "Error: Model file not loaded."
 
     frame_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
     annotated_bgr = frame_bgr.copy()
@@ -196,7 +203,7 @@ def predict_uploaded_image(image_rgb: np.ndarray | None):
             continue
 
         face_input = preprocess_face(face_crop)
-        probs = model.predict(face_input, verbose=0)[0]
+        probs = model(face_input, training=False).numpy()[0]
         pred_idx = int(np.argmax(probs))
         pred_emotion = EMOTION_LABELS[pred_idx]
         confidence = float(probs[pred_idx])
@@ -226,12 +233,15 @@ def predict_uploaded_image(image_rgb: np.ndarray | None):
 
 
 # ── 3. Grad-CAM Handler ───────────────────────────────────────────────
-def explain_gradcam_image(image_rgb: np.ndarray | None, target_emotion: str):
+def explain_gradcam_image(image_rgb: np.ndarray | dict | None, target_emotion: str):
     """
     Generate Grad-CAM heatmap explainability visualization.
     Returns: (overlay_image_rgb, raw_heatmap_rgb, explanation_md)
     """
-    if image_rgb is None or image_rgb.size == 0:
+    if isinstance(image_rgb, dict):
+        image_rgb = image_rgb.get("composite") or image_rgb.get("background") or image_rgb.get("image")
+
+    if image_rgb is None or not isinstance(image_rgb, np.ndarray) or image_rgb.size == 0:
         return None, None, "Please upload an image for Grad-CAM explanation."
 
     if model is None:
@@ -310,7 +320,8 @@ with gr.Blocks(title="Facial Emotion Recognition") as demo:
                 fn=predict_live_stream,
                 inputs=[webcam_input, enable_stream_toggle],
                 outputs=[live_output_image, live_label_output, live_status_output],
-                stream_every=0.1,
+                stream_every=0.15,
+                queue=False,
             )
 
         # ── TAB 2: UPLOAD IMAGE ─────────────────────────────────────────
@@ -394,5 +405,31 @@ with gr.Blocks(title="Facial Emotion Recognition") as demo:
 
 # ── Main Entry Point ──────────────────────────────────────────────────
 if __name__ == "__main__":
-    demo.queue(default_concurrency_limit=10)
-    demo.launch(server_name="0.0.0.0", share=True)
+    parser = argparse.ArgumentParser(
+        description="Facial Emotion Recognition Gradio Web App & Local Webcam"
+    )
+    parser.add_argument(
+        "--local",
+        "-l",
+        action="store_true",
+        help="Run native local OpenCV webcam window (cv2.VideoCapture(0)) for high-FPS system camera performance",
+    )
+    args = parser.parse_args()
+
+    if args.local:
+        try:
+            from src.webcam import run_webcam
+        except ModuleNotFoundError:
+            from webcam import run_webcam
+
+        if model is None:
+            print("[app] Error: Cannot run local webcam because model failed to load.", file=sys.stderr)
+            sys.exit(1)
+
+        print("\n[app] 🎥 Launching native local OpenCV webcam mode...")
+        print("[app] Press 'q' or 'ESC' in the OpenCV window to exit.\n")
+        run_webcam(model=model, cascade_path=CASCADE_PATH)
+    else:
+        print("\n[app] 🌐 Launching Gradio Web App with Public Share link...")
+        demo.queue(default_concurrency_limit=10)
+        demo.launch(server_name="0.0.0.0", share=True)
