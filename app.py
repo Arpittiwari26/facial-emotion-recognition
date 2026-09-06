@@ -75,12 +75,15 @@ last_frame_time = [time.time()]
 
 
 # ── 1. Live Stream Handler ────────────────────────────────────────────
-def predict_live_stream(frame_rgb: np.ndarray | None):
+def predict_live_stream(frame_rgb: np.ndarray | None, enable_stream: bool = True):
     """
     Process continuous browser webcam frames with ultra-fast inference & exception safety.
-    Inputs: frame_rgb (numpy array from browser webcam).
+    Inputs: frame_rgb (numpy array from browser webcam), enable_stream (bool).
     Returns: (annotated_frame_rgb, emotion_probabilities_dict, status_fps_str)
     """
+    if not enable_stream:
+        return None, {"Stream paused": 1.0}, "Stream paused. Check 'Enable Live Webcam Streaming' to resume."
+
     try:
         if frame_rgb is None or frame_rgb.size == 0:
             return None, {"No face detected": 1.0}, "0.0 FPS | Waiting for browser camera..."
@@ -276,6 +279,11 @@ with gr.Blocks(title="Facial Emotion Recognition") as demo:
             The frame stream will automatically detect faces, run CNN inference, apply temporal smoothing, and display bounding boxes with real-time emotion predictions!
             """)
 
+            enable_stream_toggle = gr.Checkbox(
+                label="⚡ Enable Live Webcam Streaming (Uncheck when switching tabs to free bandwidth)",
+                value=True,
+            )
+
             with gr.Row():
                 webcam_input = gr.Image(
                     sources=["webcam"],
@@ -300,7 +308,7 @@ with gr.Blocks(title="Facial Emotion Recognition") as demo:
 
             webcam_input.stream(
                 fn=predict_live_stream,
-                inputs=[webcam_input],
+                inputs=[webcam_input, enable_stream_toggle],
                 outputs=[live_output_image, live_label_output, live_status_output],
                 stream_every=0.1,
             )
@@ -387,4 +395,4 @@ with gr.Blocks(title="Facial Emotion Recognition") as demo:
 # ── Main Entry Point ──────────────────────────────────────────────────
 if __name__ == "__main__":
     demo.queue(default_concurrency_limit=10)
-    demo.launch(share=True)
+    demo.launch(server_name="0.0.0.0", share=True)
