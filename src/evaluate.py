@@ -26,7 +26,10 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
-from preprocess import EMOTION_LABELS, load_preprocessed
+try:
+    from src.preprocess import EMOTION_LABELS, load_preprocessed
+except ModuleNotFoundError:
+    from preprocess import EMOTION_LABELS, load_preprocessed
 from tensorflow.keras.models import load_model
 
 RESULTS_DIR = Path("results")

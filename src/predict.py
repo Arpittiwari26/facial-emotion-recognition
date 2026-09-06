@@ -21,9 +21,12 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import tensorflow as tf
+try:
+    from src.model import EMOTION_LABELS
+except ModuleNotFoundError:
+    from model import EMOTION_LABELS
 
-from model import EMOTION_LABELS, load_model
+from tensorflow.keras.models import load_model
 
 IMG_SIZE = 48
 

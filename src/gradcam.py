@@ -216,8 +216,13 @@ class GradCAMExplainer:
 
 if __name__ == "__main__":
     # Quick test: load model and run Grad-CAM on a sample
-    from model import load_model, EMOTION_LABELS
-    from preprocess import load_preprocessed
+    try:
+        from src.model import EMOTION_LABELS
+        from src.preprocess import load_preprocessed
+    except ModuleNotFoundError:
+        from model import EMOTION_LABELS
+        from preprocess import load_preprocessed
+    from tensorflow.keras.models import load_model
 
     print("Loading model and data for Grad-CAM test...")
     model = load_model("models/emotion_model.keras")
