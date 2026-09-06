@@ -49,7 +49,7 @@ def find_cascade() -> str:
 def detect_faces(
     image: np.ndarray,
     cascade_path: str = "",
-    allow_fallback: bool = False,
+    allow_fallback: bool = True,
 ) -> list[tuple[int, int, int, int]]:
     """Detect faces with OpenCV Haar cascade. Returns list of (x, y, w, h)."""
     if image is None or image.size == 0:
@@ -70,15 +70,25 @@ def detect_faces(
         if cascade_cls is not None and Path(cascade_path).exists():
             cascade = cascade_cls(str(cascade_path))
             if not cascade.empty():
+                # Pass 1: Standard detection
                 faces = cascade.detectMultiScale(
-                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)
+                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
+                )
+                if len(faces) > 0:
+                    return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+
+                # Pass 2: Looser detection on equalized image
+                gray_eq = cv2.equalizeHist(gray)
+                faces = cascade.detectMultiScale(
+                    gray_eq, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20)
                 )
                 if len(faces) > 0:
                     return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
     except Exception as e:
         print(f"Warning in detect_faces: {e}")
 
-    if allow_fallback or (w_img <= 180 and h_img <= 180):
+    # Fallback to full image if no bounding box found so prediction always runs
+    if allow_fallback:
         return [(0, 0, w_img, h_img)]
 
     return []

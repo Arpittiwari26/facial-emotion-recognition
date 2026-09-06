@@ -166,7 +166,7 @@ with tab_upload:
 
             with col2:
                 st.subheader("Prediction")
-                allow_fallback = st.checkbox("Analyze full image if face detector finds 0 faces", value=False, key="up_fb")
+                allow_fallback = st.checkbox("Analyze full image if face detector finds 0 faces", value=True, key="up_fb")
                 model, err = get_model()
                 if err:
                     st.error(err)
@@ -312,7 +312,7 @@ with tab_webcam:
 
             with col2:
                 st.subheader("Prediction")
-                allow_fallback_cam = st.checkbox("Analyze full photo if face detector finds 0 faces", value=False, key="cam_fb")
+                allow_fallback_cam = st.checkbox("Analyze full photo if face detector finds 0 faces", value=True, key="cam_fb")
                 model, err = get_model()
                 if err:
                     st.error(err)
