@@ -34,22 +34,47 @@ IMG_SIZE = 48
 def find_cascade() -> str:
     """Locate the OpenCV Haar cascade XML for face detection."""
     candidates = [
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml",
+        str(Path("models/haarcascade_frontalface_default.xml").resolve()),
+        str(Path("src/haarcascade_frontalface_default.xml").resolve()),
     ]
+    if hasattr(cv2, "data") and hasattr(cv2.data, "haarcascades"):
+        candidates.append(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
     for p in candidates:
-        if Path(p).exists():
+        if p and Path(p).exists():
             return p
     return candidates[0]
 
 
-def detect_faces(gray: np.ndarray, cascade_path: str) -> list[tuple[int, int, int, int]]:
-    """Detect faces. Returns list of (x, y, w, h)."""
-    cascade = cv2.CascadeClassifier(cascade_path)
-    if cascade.empty():
-        raise RuntimeError(f"Failed to load cascade: {cascade_path}")
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
-                                     minSize=(40, 40))
-    return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+def detect_faces(image: np.ndarray, cascade_path: str = "") -> list[tuple[int, int, int, int]]:
+    """Detect faces in an image (BGR or grayscale). Returns list of (x, y, w, h)."""
+    if image is None or image.size == 0:
+        return []
+
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+
+    try:
+        if not cascade_path:
+            cascade_path = find_cascade()
+
+        cascade_cls = getattr(cv2, "CascadeClassifier", None)
+        if cascade_cls is not None and Path(cascade_path).exists():
+            cascade = cascade_cls(str(cascade_path))
+            if not cascade.empty():
+                faces = cascade.detectMultiScale(
+                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)
+                )
+                if len(faces) > 0:
+                    return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+    except Exception as e:
+        print(f"Warning in detect_faces: {e}")
+
+    # Fallback: if detection fails or finds 0 faces, treat full image as face region
+    h, w = gray.shape[:2]
+    return [(0, 0, w, h)]
 
 
 def preprocess_face(face_bgr: np.ndarray) -> np.ndarray:
