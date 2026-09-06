@@ -51,8 +51,8 @@ python src/evaluate.py
 # 7. REAL-TIME webcam demo (PRIMARY FEATURE)
 python src/webcam.py
 
-# 8. Streamlit web app (upload + metrics + Grad-CAM)
-streamlit run app.py
+# 8. Gradio web app (live browser webcam + upload + Grad-CAM)
+python app.py
 
 # 9. Predict on a single image
 python src/predict.py path/to/image.jpg
@@ -85,7 +85,7 @@ facial-emotion-recognition/
 │   ├── predict.py          # Single-image prediction with face detection
 │   ├── webcam.py           # REAL-TIME webcam emotion recognition
 │   └── gradcam.py          # Grad-CAM heatmap generation
-├── app.py                  # Streamlit web application
+├── app.py                  # Gradio web application for Hugging Face Spaces
 ├── requirements.txt        # Python dependencies
 ├── README.md               # This file
 └── .gitignore

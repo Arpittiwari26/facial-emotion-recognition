@@ -1,33 +1,27 @@
 """
 app.py
 
-Streamlit web application for the Facial Emotion Recognition system.
+Gradio web application for Facial Emotion Recognition.
+Provides continuous browser-webcam streaming, image upload,
+Grad-CAM explainability, and dataset metrics.
 
-Features:
-  - Upload an image → face detection → emotion prediction + Grad-CAM
-  - Webcam capture (browser-based single photo)
-  - Model performance metrics (confusion matrix, training plots, per-class metrics)
-  - Interactive Grad-CAM explainability
-
-PRIMARY real-time demo is still src/webcam.py (OpenCV native window).
-This Streamlit app complements it for upload-based testing, metrics viewing,
-and Grad-CAM visualization.
+Compatible with Hugging Face Spaces.
 """
 
 from __future__ import annotations
 
 import io
 import sys
+import time
 from pathlib import Path
 
 import cv2
 import numpy as np
-import streamlit as st
 import tensorflow as tf
+import gradio as gr
 from PIL import Image
 
-# Ensure src/ is on the path so Streamlit can import src/* modules
-# when running from the project root (streamlit run app.py)
+# Ensure src/ is on sys.path
 _SCRIPT_DIR = Path(__file__).parent
 _SRC_DIR = _SCRIPT_DIR / "src"
 if str(_SRC_DIR.resolve()) not in sys.path:
@@ -36,596 +30,347 @@ if str(_SRC_DIR.resolve()) not in sys.path:
 try:
     from src.model import EMOTION_LABELS
     from src.predict import detect_faces, preprocess_face, find_cascade
-    from src.gradcam import GradCAMExplainer
+    from src.gradcam import explain_prediction
 except ModuleNotFoundError:
     from model import EMOTION_LABELS
     from predict import detect_faces, preprocess_face, find_cascade
-    from gradcam import GradCAMExplainer
+    from gradcam import explain_prediction
 
-# ── Paths ────────────────────────────────────────────────────────────
+# ── Paths & Model Loading ────────────────────────────────────────────
 MODEL_PATH = Path("models/emotion_model.keras")
-RESULTS_DIR = Path("results")
 CASCADE_PATH = find_cascade()
 
-st.set_page_config(
-    page_title="Facial Emotion Recognition",
-    page_icon="😊",
-    layout="wide",
-)
-
-
-# ── Sidebar ──────────────────────────────────────────────────────────
-with st.sidebar:
-    st.title("😊 Facial Emotion Recognition")
-    st.markdown("""
-    **Real-time facial emotion recognition** using a CNN trained on
-    the FER-2013 dataset (35,887 grayscale 48×48 face images).
-
-    Built with TensorFlow/Keras, OpenCV, and Streamlit.
-    """)
-
-    st.markdown("---")
-
-    # Model status
-    st.subheader("Model Status")
-    if MODEL_PATH.exists():
-        st.success("✅ Model found")
-        try:
-            model = tf.keras.models.load_model(MODEL_PATH)
-            st.write(f"**Parameters:** {model.count_params():,}")
-            st.write(f"**Input shape:** {model.input_shape}")
-            st.write(f"**Output shape:** {model.output_shape}")
-        except Exception as e:
-            st.error(f"Failed to load: {e}")
-    else:
-        st.warning("⚠️ Model not found")
-        st.info("Train first: `python src/train.py`")
-
-    st.markdown("---")
-    st.markdown("""
-    **7 Emotions:**
-    | # | Emotion |
-    |---|---------|
-    | 0 | 😠 Angry |
-    | 1 | 🤢 Disgust |
-    | 2 | 😨 Fear |
-    | 3 | 😄 Happy |
-    | 4 | 😢 Sad |
-    | 5 | 😲 Surprise |
-    | 6 | 😐 Neutral |
-    """)
-
-    st.markdown("---")
-    st.markdown("""
-    **Quick Commands:**
-    ```bash
-    python src/train.py          # Train model
-    python src/evaluate.py       # Evaluate
-    python src/predict.py img.jpg  # Single image
-    python src/webcam.py         # REAL-TIME webcam ← main demo
-    streamlit run app.py         # This app
-    ```
-    """)
-
-
-# ── Load model (cached in RAM for instant inference) ─────────────────
-@st.cache_resource
-def get_model():
-    """Load model on demand. Returns (model, error_msg)."""
-    if not MODEL_PATH.exists():
-        return None, "Model not found. Train with `python src/train.py`."
+model: tf.keras.Model | None = None
+if MODEL_PATH.exists():
     try:
-        m = tf.keras.models.load_model(MODEL_PATH)
-        return m, None
+        model = tf.keras.models.load_model(MODEL_PATH)
+        print(f"[app] Loaded model from {MODEL_PATH}")
     except Exception as e:
-        return None, f"Failed to load model: {e}"
+        print(f"[app] Failed to load model: {e}")
+else:
+    print(f"[app] Warning: Model file not found at {MODEL_PATH}")
 
 
-# ── Tabs ─────────────────────────────────────────────────────────────
-tab_upload, tab_webcam, tab_metrics, tab_gradcam = st.tabs([
-    "📸 Upload Image",
-    "🎥 Webcam Photo",
-    "📊 Model Metrics",
-    "🔍 Grad-CAM",
-])
+# ── Temporal Smoothing Class ──────────────────────────────────────────
+class EmotionSmoothie:
+    """Rolling temporal smoother for live frame predictions."""
+
+    def __init__(self, window_size: int = 5):
+        self.window_size = window_size
+        self.history: list[np.ndarray] = []
+
+    def update(self, probs: np.ndarray) -> np.ndarray:
+        self.history.append(probs)
+        if len(self.history) > self.window_size:
+            self.history.pop(0)
+        return np.mean(self.history, axis=0)
+
+    def reset(self):
+        self.history.clear()
 
 
-# ═════════════════════════════════════════════════════════════════════
-# TAB 1: UPLOAD IMAGE
-# ═════════════════════════════════════════════════════════════════════
+# Global smoothie instance & frame timer for live streaming
+global_smoother = EmotionSmoothie(window_size=5)
+last_frame_time = [time.time()]
 
-with tab_upload:
-    st.header("Upload an Image for Emotion Prediction")
-    st.markdown("""
-    The image is processed as follows:
-    1. OpenCV detects faces using a Haar cascade
-    2. Each detected face is cropped, resized to 48×48, converted to grayscale
-    3. The CNN predicts probabilities for all 7 emotions
-    4. Results are displayed with bounding boxes, emotion labels, and
-       probability distributions
-    """)
 
-    uploaded_file = st.file_uploader(
-        "Choose an image...",
-        type=["jpg", "jpeg", "png", "bmp", "webp"],
+# ── 1. Live Stream Handler ────────────────────────────────────────────
+def predict_live_stream(frame_rgb: np.ndarray | None):
+    """
+    Process continuous browser webcam frames from Gradio streaming input.
+    Inputs: frame_rgb (numpy array from browser webcam).
+    Returns: (annotated_frame_rgb, emotion_probabilities_dict, status_fps_str)
+    """
+    if frame_rgb is None or frame_rgb.size == 0:
+        return None, {"No face detected": 1.0}, "0.0 FPS | Waiting for browser camera..."
+
+    if model is None:
+        return frame_rgb, {"Model missing": 1.0}, "Error: Model file not loaded."
+
+    now = time.time()
+    dt = now - last_frame_time[0]
+    last_frame_time[0] = now
+    fps = (1.0 / dt) if (dt > 0 and dt < 2.0) else 0.0
+
+    # Convert RGB frame from Gradio to BGR for OpenCV
+    frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    annotated_bgr = frame_bgr.copy()
+
+    faces = detect_faces(frame_bgr, CASCADE_PATH, allow_fallback=False)
+
+    if len(faces) == 0:
+        # Overlay clear status banner
+        cv2.putText(
+            annotated_bgr, "No face detected", (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2
+        )
+        annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+        return annotated_rgb, {"No face detected": 1.0}, f"FPS: {fps:.1f} | Status: No face detected"
+
+    summary_probs: dict[str, float] = {}
+
+    for i, (x, y, w, h) in enumerate(faces):
+        face_crop = frame_bgr[y:y+h, x:x+w]
+        if face_crop.size == 0:
+            continue
+
+        face_input = preprocess_face(face_crop)
+        raw_probs = model.predict(face_input, verbose=0)[0]
+
+        # Apply temporal smoothing across recent frames
+        smoothed_probs = global_smoother.update(raw_probs)
+        pred_idx = int(np.argmax(smoothed_probs))
+        pred_emotion = EMOTION_LABELS[pred_idx]
+        confidence = float(smoothed_probs[pred_idx])
+
+        # Draw bounding box
+        color = (0, 255, 0)
+        cv2.rectangle(annotated_bgr, (x, y), (x+w, y+h), color, 2)
+        label_text = f"{pred_emotion} {confidence*100:.0f}%"
+
+        # Label box background
+        (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        y_label = max(y - 8, th + 8)
+        cv2.rectangle(
+            annotated_bgr,
+            (x, y_label - th - 4), (x + tw + 6, y_label + 4),
+            color, -1
+        )
+        cv2.putText(
+            annotated_bgr, label_text, (x + 3, y_label),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2
+        )
+
+        for j, em_name in enumerate(EMOTION_LABELS):
+            summary_probs[em_name] = float(smoothed_probs[j])
+
+    # Overlay FPS counter at top right
+    cv2.putText(
+        annotated_bgr, f"FPS: {fps:.1f}", (annotated_bgr.shape[1] - 120, 35),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
     )
 
-    if uploaded_file is not None:
-        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-        image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-        if image is None:
-            st.error("Could not decode image. Try a different file.")
-        else:
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.subheader("Uploaded Image")
-                st.image(image, channels="BGR", use_container_width=True)
-                st.write(f"Size: {image.shape[1]}×{image.shape[0]} pixels")
-
-            with col2:
-                st.subheader("Prediction")
-                allow_fallback = st.checkbox("Analyze full image if face detector finds 0 faces", value=True, key="up_fb")
-                model, err = get_model()
-                if err:
-                    st.error(err)
-                else:
-                    try:
-                        faces = detect_faces(image, CASCADE_PATH, allow_fallback=allow_fallback)
-
-                        if len(faces) == 0:
-                            st.warning("⚠️ No face detected in the image.")
-                            st.info("💡 **Tips for best results:**\n"
-                                    "- Ensure your face is upright, well-lit, and facing forward.\n"
-                                    "- If you uploaded an image that is ALREADY a cropped face, check the box above: *'Analyze full image if face detector finds 0 faces'*.")
-                        else:
-                            annotated = image.copy()
-                            results = []
-
-                            for i, (x, y, w, h) in enumerate(faces):
-                                face_crop = image[y:y+h, x:x+w]
-                                if face_crop.size == 0:
-                                    continue
-
-                                face_input = preprocess_face(face_crop)
-                                probs = model.predict(face_input, verbose=0)[0]
-                                pred_idx = int(np.argmax(probs))
-                                pred_emotion = EMOTION_LABELS[pred_idx]
-                                confidence = float(probs[pred_idx])
-
-                                results.append({
-                                    "bbox": (x, y, w, h),
-                                    "emotion": pred_emotion,
-                                    "confidence": confidence,
-                                    "probs": {EMOTION_LABELS[j]: float(probs[j])
-                                              for j in range(len(probs))},
-                                })
-
-                                # Draw on annotated image
-                                color = (0, 255, 0)
-                                cv2.rectangle(
-                                    annotated, (x, y), (x+w, y+h), color, 2
-                                )
-                                label = f"{pred_emotion} {confidence*100:.1f}%"
-                                (tw, th), _ = cv2.getTextSize(
-                                    label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
-                                )
-                                cv2.rectangle(
-                                    annotated,
-                                    (x, y+h+8), (x+tw+8, y+h+8+th+4),
-                                    color, -1,
-                                )
-                                cv2.putText(
-                                    annotated, label, (x+4, y+h+8+th),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                                    (255, 255, 255), 2,
-                                )
-
-                                # Mini probability bars
-                                bar_x = x
-                                bar_y = y + h + 30
-                                bar_w = min(w, 150)
-                                bar_h = 4
-                                sorted_pairs = sorted(
-                                    enumerate(probs), key=lambda x: -x[1]
-                                )[:3]
-                                for j, (idx, prob) in enumerate(sorted_pairs):
-                                    bar_color = (0, 255, 0) if idx == pred_idx else (100, 100, 100)
-                                    cv2.rectangle(
-                                        annotated,
-                                        (bar_x, bar_y + j*10),
-                                        (bar_x + int(bar_w * prob),
-                                         bar_y + j*10 + bar_h),
-                                        bar_color, -1,
-                                    )
-                                    cv2.putText(
-                                        annotated,
-                                        f"{EMOTION_LABELS[idx]} {prob*100:.0f}%",
-                                        (bar_x + int(bar_w*prob) + 3,
-                                         bar_y + j*10 + bar_h - 2),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.35,
-                                        bar_color, 1,
-                                    )
-
-                            st.image(
-                                annotated, channels="BGR",
-                                use_container_width=True,
-                            )
-
-                            for i, res in enumerate(results):
-                                with st.expander(
-                                    f"Face #{i+1}: {res['emotion']} "
-                                    f"({res['confidence']*100:.1f}%)"
-                                ):
-                                    st.write(f"**Bounding box:** {res['bbox']}")
-                                    st.write(f"**Predicted emotion:** "
-                                             f"{res['emotion']}")
-                                    st.write(f"**Confidence:** "
-                                             f"{res['confidence']*100:.2f}%")
-                                    st.write("**All emotion probabilities:**")
-                                    sorted_probs = sorted(
-                                        res["probs"].items(),
-                                        key=lambda x: -x[1],
-                                    )
-                                    for em, prob in sorted_probs:
-                                        st.write(f"  - {em}: {prob*100:.2f}%")
-
-                    except Exception as e:
-                        st.error(f"Prediction error: {e}")
+    annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+    status_str = f"FPS: {fps:.1f} | Detected {len(faces)} face(s)"
+    return annotated_rgb, summary_probs, status_str
 
 
-# ═════════════════════════════════════════════════════════════════════
-# TAB 2: WEBCAM PHOTO
-# ═════════════════════════════════════════════════════════════════════
+# ── 2. Upload Image Handler ───────────────────────────────────────────
+def predict_uploaded_image(image_rgb: np.ndarray | None):
+    """
+    Process single uploaded image.
+    Returns: (annotated_image_rgb, emotion_probabilities_dict, status_str)
+    """
+    if image_rgb is None or image_rgb.size == 0:
+        return None, {}, "Please upload an image."
 
-with tab_webcam:
-    st.header("Webcam Photo Capture")
-    st.markdown("""
-    Take a single photo with your browser's webcam.
+    if model is None:
+        return image_rgb, {}, "Error: Model file not loaded."
 
-    **For continuous real-time video** (the main demo of this project),
-    run the dedicated OpenCV application:
+    frame_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    annotated_bgr = frame_bgr.copy()
 
-    ```bash
-    python src/webcam.py
-    ```
+    faces = detect_faces(frame_bgr, CASCADE_PATH, allow_fallback=True)
 
-    That gives you a live window with bounding boxes, emotion labels,
-    FPS counter, and temporal smoothing — continuously.
+    summary_probs: dict[str, float] = {}
+
+    for i, (x, y, w, h) in enumerate(faces):
+        face_crop = frame_bgr[y:y+h, x:x+w]
+        if face_crop.size == 0:
+            continue
+
+        face_input = preprocess_face(face_crop)
+        probs = model.predict(face_input, verbose=0)[0]
+        pred_idx = int(np.argmax(probs))
+        pred_emotion = EMOTION_LABELS[pred_idx]
+        confidence = float(probs[pred_idx])
+
+        color = (0, 255, 0)
+        cv2.rectangle(annotated_bgr, (x, y), (x+w, y+h), color, 2)
+        label_text = f"{pred_emotion} {confidence*100:.1f}%"
+
+        (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+        y_label = max(y - 8, th + 8)
+        cv2.rectangle(
+            annotated_bgr,
+            (x, y_label - th - 4), (x + tw + 6, y_label + 4),
+            color, -1
+        )
+        cv2.putText(
+            annotated_bgr, label_text, (x + 3, y_label),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2
+        )
+
+        for j, em_name in enumerate(EMOTION_LABELS):
+            summary_probs[em_name] = float(probs[j])
+
+    annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+    status_str = f"Analysis complete. Detected {len(faces)} face region(s)."
+    return annotated_rgb, summary_probs, status_str
+
+
+# ── 3. Grad-CAM Handler ───────────────────────────────────────────────
+def explain_gradcam_image(image_rgb: np.ndarray | None, target_emotion: str):
+    """
+    Generate Grad-CAM heatmap explainability visualization.
+    Returns: (overlay_image_rgb, raw_heatmap_rgb, explanation_md)
+    """
+    if image_rgb is None or image_rgb.size == 0:
+        return None, None, "Please upload an image for Grad-CAM explanation."
+
+    if model is None:
+        return None, None, "Error: Model file not loaded."
+
+    frame_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    faces = detect_faces(frame_bgr, CASCADE_PATH, allow_fallback=True)
+
+    if len(faces) == 0:
+        return None, None, "No face detected in the image."
+
+    x, y, w, h = faces[0]
+    face_crop = frame_bgr[y:y+h, x:x+w]
+
+    target_class = None
+    if target_emotion in EMOTION_LABELS:
+        target_class = EMOTION_LABELS.index(target_emotion)
+
+    res = explain_prediction(model, face_crop, EMOTION_LABELS, target_class=target_class)
+
+    overlay_bgr = res["overlay"]
+    overlay_rgb = cv2.cvtColor(overlay_bgr, cv2.COLOR_BGR2RGB)
+
+    heatmap = res["heatmap"]
+    heatmap_color_bgr = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
+    heatmap_rgb = cv2.cvtColor(heatmap_color_bgr, cv2.COLOR_BGR2RGB)
+
+    explanation_text = res["explanation"]
+    return overlay_rgb, heatmap_rgb, explanation_text
+
+
+# ── Build Gradio Interface ───────────────────────────────────────────
+with gr.Blocks(title="Facial Emotion Recognition") as demo:
+    gr.Markdown("""
+    # 😊 Facial Emotion Recognition System
+    Real-time browser webcam facial emotion recognition trained on the **FER-2013** dataset (35,887 grayscale 48×48 face images).
     """)
 
-    webcam_photo = st.camera_input("Take a photo with your webcam")
+    with gr.Tabs():
+        # ── TAB 1: LIVE BROWSER WEBCAM ──────────────────────────────────
+        with gr.TabItem("🎥 Live Expression"):
+            gr.Markdown("""
+            ### 🎥 Live Browser Webcam Feed
+            Click the camera component below to turn on your browser webcam.
+            The frame stream will automatically detect faces, run CNN inference, apply temporal smoothing, and display bounding boxes with real-time emotion predictions!
+            """)
 
-    if webcam_photo is not None:
-        file_bytes = np.asarray(bytearray(webcam_photo.read()), dtype=np.uint8)
-        image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+            with gr.Row():
+                webcam_input = gr.Image(
+                    sources=["webcam"],
+                    streaming=True,
+                    type="numpy",
+                    label="Browser Webcam Input",
+                )
+                live_output_image = gr.Image(
+                    label="Live Annotated Stream",
+                    type="numpy",
+                )
 
-        if image is None:
-            st.error("Could not decode webcam photo.")
-        else:
-            col1, col2 = st.columns(2)
+            with gr.Row():
+                live_label_output = gr.Label(
+                    num_top_classes=7,
+                    label="Live Emotion Probabilities",
+                )
+                live_status_output = gr.Textbox(
+                    label="Stream Status / FPS",
+                    interactive=False,
+                )
 
-            with col1:
-                st.subheader("Captured Photo")
-                st.image(image, channels="BGR", use_container_width=True)
+            webcam_input.stream(
+                fn=predict_live_stream,
+                inputs=[webcam_input],
+                outputs=[live_output_image, live_label_output, live_status_output],
+                stream_every=0.04,
+            )
 
-            with col2:
-                st.subheader("Prediction")
-                allow_fallback_cam = st.checkbox("Analyze full photo if face detector finds 0 faces", value=True, key="cam_fb")
-                model, err = get_model()
-                if err:
-                    st.error(err)
-                else:
-                    try:
-                        faces = detect_faces(image, CASCADE_PATH, allow_fallback=allow_fallback_cam)
+        # ── TAB 2: UPLOAD IMAGE ─────────────────────────────────────────
+        with gr.TabItem("📸 Upload Image"):
+            gr.Markdown("### 📸 Single Image Emotion Prediction")
+            with gr.Row():
+                upload_input = gr.Image(
+                    sources=["upload"],
+                    type="numpy",
+                    label="Upload Image",
+                )
+                upload_output_image = gr.Image(
+                    label="Annotated Result",
+                    type="numpy",
+                )
 
-                        if len(faces) == 0:
-                            st.warning("⚠️ No face detected in the photo.")
-                            st.info("💡 **Tips for best results:**\n"
-                                    "- Ensure your face is centered, upright, and well-lit.\n"
-                                    "- If face is not detected automatically, check *'Analyze full photo if face detector finds 0 faces'* above.")
-                        else:
-                            annotated = image.copy()
-                            for i, (x, y, w, h) in enumerate(faces):
-                                face_crop = image[y:y+h, x:x+w]
-                                if face_crop.size == 0:
-                                    continue
+            with gr.Row():
+                upload_label_output = gr.Label(
+                    num_top_classes=7,
+                    label="Emotion Probabilities",
+                )
+                upload_status_output = gr.Textbox(
+                    label="Status",
+                    interactive=False,
+                )
 
-                                face_input = preprocess_face(face_crop)
-                                probs = model.predict(face_input, verbose=0)[0]
-                                pred_idx = int(np.argmax(probs))
-                                pred_emotion = EMOTION_LABELS[pred_idx]
-                                confidence = float(probs[pred_idx])
+            upload_button = gr.Button("Predict Emotion", variant="primary")
+            upload_button.click(
+                fn=predict_uploaded_image,
+                inputs=[upload_input],
+                outputs=[upload_output_image, upload_label_output, upload_status_output],
+            )
 
-                                color = (0, 255, 0)
-                                cv2.rectangle(
-                                    annotated, (x, y), (x+w, y+h), color, 2
-                                )
-                                label = f"{pred_emotion} {confidence*100:.1f}%"
-                                cv2.putText(
-                                    annotated, label, (x, y-8),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                                    color, 2,
-                                )
+        # ── TAB 3: GRAD-CAM ─────────────────────────────────────────────
+        with gr.TabItem("🔍 Grad-CAM"):
+            gr.Markdown("### 🔍 Grad-CAM Explainability Visualization")
+            gr.Markdown("Grad-CAM highlights the facial regions (mouth, eyes, eyebrows) that most influenced the CNN model's prediction.")
 
-                            st.image(
-                                annotated, channels="BGR",
-                                use_container_width=True,
-                            )
+            with gr.Row():
+                gradcam_input = gr.Image(
+                    sources=["upload"],
+                    type="numpy",
+                    label="Upload Face Image",
+                )
+                gradcam_target_dropdown = gr.Dropdown(
+                    choices=["Auto (Predicted)"] + EMOTION_LABELS,
+                    value="Auto (Predicted)",
+                    label="Target Emotion Class to Explain",
+                )
 
-                            for i, (x, y, w, h) in enumerate(faces):
-                                face_crop = image[y:y+h, x:x+w]
-                                if face_crop.size == 0:
-                                    continue
-                                face_input = preprocess_face(face_crop)
-                                probs = model.predict(face_input, verbose=0)[0]
-                                pred_idx = int(np.argmax(probs))
-                                st.success(
-                                    f"Face #{i+1}: **{EMOTION_LABELS[pred_idx]}** "
-                                    f"({probs[pred_idx]*100:.1f}%)"
-                                )
-                    except Exception as e:
-                        st.error(f"Prediction error: {e}")
+            with gr.Row():
+                gradcam_overlay_output = gr.Image(
+                    label="Grad-CAM Overlay Heatmap",
+                    type="numpy",
+                )
+                gradcam_raw_output = gr.Image(
+                    label="Raw Attention Heatmap",
+                    type="numpy",
+                )
 
+            gradcam_explanation_text = gr.Markdown()
+            gradcam_button = gr.Button("Generate Grad-CAM Explanation", variant="primary")
+            gradcam_button.click(
+                fn=explain_gradcam_image,
+                inputs=[gradcam_input, gradcam_target_dropdown],
+                outputs=[gradcam_overlay_output, gradcam_raw_output, gradcam_explanation_text],
+            )
 
-# ═════════════════════════════════════════════════════════════════════
-# TAB 3: MODEL METRICS
-# ═════════════════════════════════════════════════════════════════════
+        # ── TAB 4: METRICS & SYSTEM INFO ────────────────────────────────
+        with gr.TabItem("📊 Model Metrics & System Info"):
+            gr.Markdown("""
+            ### 📊 Model Architecture & Performance Details
 
-with tab_metrics:
-    st.header("Model Performance Metrics")
+            - **Dataset**: FER-2013 (Kaggle) — 35,887 grayscale 48×48 pixel face images
+            - **Emotion Classes (7)**: `0: Angry`, `1: Disgust`, `2: Fear`, `3: Happy`, `4: Sad`, `5: Surprise`, `6: Neutral`
+            - **CNN Architecture**: 3-Block VGG-style Conv2D (32→64→128) + Flatten + Dense(256) + Dense(7, Softmax)
+            - **Test Accuracy**: **52.94%** across 3,589 real test set images
+            - **Pre-processing**: Face crop → Grayscale conversion → 48×48 Resize → Pixel Normalization (`[0, 1]`) → Batch Dimension `(1, 48, 48, 1)`
+            - **Deployment**: Hugging Face Spaces + Gradio (Browser Webcam Streaming)
+            """)
 
-    # Confusion matrix
-    cm_path = RESULTS_DIR / "confusion_matrix.png"
-    if cm_path.exists():
-        st.subheader("Confusion Matrix")
-        st.image(
-            str(cm_path),
-            caption="Normalized confusion matrix on FER-2013 test set "
-                    "(rows = true emotion, columns = predicted emotion)",
-            use_container_width=True,
-        )
-        st.markdown("""
-        **How to read:**
-        - Each row sums to 1.0 (all samples of that true emotion).
-        - Diagonal = correct predictions.
-        - Off-diagonal = misclassifications. High values show commonly confused emotions.
-        - Example: if "Fear → Surprise" has a high value, the model often mistakes fear for surprise.
-        """)
-    else:
-        st.info("Confusion matrix not found. Run: `python src/evaluate.py`")
-
-    # Training plots
-    hist_path = RESULTS_DIR / "training_history.png"
-    if hist_path.exists():
-        st.subheader("Training History")
-        st.image(
-            str(hist_path),
-            caption="Training vs validation accuracy and loss over epochs",
-            use_container_width=True,
-        )
-        st.markdown("""
-        **Identifying model behavior:**
-
-        | Pattern | Diagnosis |
-        |---------|-----------|
-        | Train & val accuracy rise together, plateau | ✅ Good convergence |
-        | Train accuracy rises, val accuracy plateaus/drops | ⚠️ Overfitting |
-        | Both train & val accuracy stay low | 🔄 Underfitting |
-        | Train loss decreases, val loss increases after some epoch | ⚠️ Overfitting |
-
-        EarlyStopping should stop training when overfitting begins, saving
-        the best checkpoint before validation performance degrades.
-        """)
-    else:
-        st.info("Training plots not found. Run: `python src/train.py`")
-
-    # Numeric metrics from JSON
-    metrics_path = RESULTS_DIR / "metrics.json"
-    if metrics_path.exists():
-        import json
-        with open(metrics_path) as f:
-            metrics = json.load(f)
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric(
-            "Test Accuracy",
-            f"{metrics.get('test_accuracy', 0)*100:.2f}%",
-        )
-        col2.metric("Test Loss", f"{metrics.get('test_loss', 0):.4f}")
-        col3.metric("Macro F1", f"{metrics.get('macro_f1', 0):.4f}")
-        col4.metric("Weighted F1", f"{metrics.get('weighted_f1', 0):.4f}")
-
-        st.markdown("---")
-        st.subheader("Per-Class Performance")
-
-        if "per_class" in metrics:
-            import pandas as pd
-            rows = []
-            for i, name in enumerate(EMOTION_LABELS):
-                pc = metrics["per_class"].get(str(i), {})
-                rows.append({
-                    "Emotion": name,
-                    "Precision": f"{pc.get('precision', 0):.4f}",
-                    "Recall": f"{pc.get('recall', 0):.4f}",
-                    "F1": f"{pc.get('f1', 0):.4f}",
-                    "Support": pc.get('support', 0),
-                })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
-    else:
-        st.info("Metrics JSON not found. Run evaluation after training.")
-
-    # Transfer learning comparison placeholder
-    st.markdown("---")
-    st.subheader("Transfer Learning Comparison (Optional)")
-    st.markdown("""
-    An optional transfer-learning model (MobileNetV2) is scaffolded in
-    `src/model.py` → `build_transfer_model()`.
-
-    To compare: train both models, then collect:
-
-    | Model | Accuracy | Macro F1 | Training Time | Parameters |
-    |-------|----------|----------|---------------|------------|
-    | Baseline CNN (from scratch) | — | — | — | ~330K |
-    | MobileNetV2 (transfer) | — | — | — | ~2.2M |
-
-    **Important:** Transfer learning is NOT automatically better. On
-    FER-2013 (48×48 grayscale, 35K images), a from-scratch CNN often
-    matches or beats transfer models because ImageNet features are tuned
-    for 224×224 RGB natural images, not tiny grayscale faces.
-    """)
-
-
-# ═════════════════════════════════════════════════════════════════════
-# TAB 4: GRAD-CAM
-# ═════════════════════════════════════════════════════════════════════
-
-with tab_gradcam:
-    st.header("Grad-CAM — Model Explainability")
-
-    st.markdown("""
-    **Grad-CAM** (Gradient-weighted Class Activation Mapping) produces a
-    heatmap showing which regions of the face image most influenced the
-    model's prediction.
-
-    ### How It Works
-
-    1. **Forward pass:** Run the image through the model to get the final
-       convolutional layer's feature maps and the predictions.
-    2. **Backward pass:** Compute the gradient of the predicted class score
-       with respect to each feature map.
-    3. **Weighting:** Average each gradient map spatially → one weight per
-       feature map (how important is this feature map for the prediction?).
-    4. **Heatmap:** Weighted sum of feature maps → coarse heatmap.
-    5. **ReLU + normalize:** Keep only positive contributions, scale to [0,1].
-    6. **Overlay:** Resize heatmap to input size, apply colormap, overlay on
-       the original face image.
-
-    ### What the Heatmap Shows
-
-    - **Bright (red/yellow) regions:** areas that strongly contributed to the
-      predicted emotion.
-    - **Dark (blue/black) regions:** areas that contributed little or
-      negatively.
-
-    ### Important Caveat
-
-    > Grad-CAM shows **where the model is looking**, NOT what biologically
-    > determines the emotion. A heatmap on the mouth for "Happy" means the
-    > model used mouth features for its decision — it does **not** prove
-    > that the mouth causes happiness. This is a model interpretability tool,
-    > not a causal analysis.
-    """)
-
-    gc_file = st.file_uploader(
-        "Upload an image for Grad-CAM analysis...",
-        type=["jpg", "jpeg", "png", "bmp", "webp"],
-        key="gradcam_uploader",
-    )
-
-    if gc_file is not None:
-        file_bytes = np.asarray(bytearray(gc_file.read()), dtype=np.uint8)
-        image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-        if image is None:
-            st.error("Could not decode image.")
-        else:
-            model, err = get_model()
-            if err:
-                st.error(err)
-            else:
-                try:
-                    faces = detect_faces(image, CASCADE_PATH)
-
-                    if len(faces) == 0:
-                        st.warning("No face detected for Grad-CAM.")
-                    else:
-                        # Show original with face boxes
-                        st.subheader("Original Image (Detected Faces)")
-                        annotated = image.copy()
-                        for (x, y, w, h) in faces:
-                            cv2.rectangle(
-                                annotated, (x, y), (x+w, y+h), (0, 255, 0), 2
-                            )
-                        st.image(
-                            annotated, channels="BGR",
-                            use_container_width=True,
-                        )
-
-                        # Grad-CAM for each face
-                        for i, (x, y, w, h) in enumerate(faces):
-                            face_crop = image[y:y+h, x:x+w]
-                            if face_crop.size == 0:
-                                continue
-
-                            face_input = preprocess_face(face_crop)
-
-                            explainer = GradCAMExplainer(model)
-                            result = explainer.explain(
-                                face_input, face_crop, EMOTION_LABELS
-                            )
-
-                            with st.expander(
-                                f"Face #{i+1} — Grad-CAM Result"
-                            ):
-                                col_a, col_b = st.columns(2)
-
-                                with col_a:
-                                    st.markdown(
-                                        f"**Predicted:** {result['predicted_emotion']} "
-                                        f"({result['confidence']*100:.1f}%)"
-                                    )
-                                    st.markdown(result["explanation"])
-                                    st.write("**All probabilities:**")
-                                    sorted_probs = sorted(
-                                        result["all_probabilities"].items(),
-                                        key=lambda x: -x[1],
-                                    )
-                                    for em, prob in sorted_probs:
-                                        st.write(f"- {em}: {prob*100:.2f}%")
-
-                                with col_b:
-                                    st.markdown("**Grad-CAM Heatmap:**")
-                                    st.image(
-                                        result["heatmap"],
-                                        caption="Heatmap (bright = more important)",
-                                        use_container_width=True,
-                                    )
-                                    st.markdown("**Overlay on Face:**")
-                                    st.image(
-                                        result["overlay"],
-                                        caption="Heatmap overlaid on original face",
-                                        use_container_width=True,
-                                    )
-
-                                    # Download button
-                                    buf = io.BytesIO()
-                                    cv2.imencode(".png",
-                                                 result["overlay"])[1].tofile(buf)
-                                    st.download_button(
-                                        label="Download Grad-CAM Overlay",
-                                        data=buf.getvalue(),
-                                        file_name=f"gradcam_face{i+1}.png",
-                                        mime="image/png",
-                                    )
-
-                except Exception as e:
-                    st.error(f"Grad-CAM error: {e}")
-
-
-# ── Footer ───────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown("""
-**About this project:** A college-level Deep Learning project demonstrating
-CNN architecture, training, evaluation, and real-time deployment for facial
-emotion recognition.
-
-**Built with:** Python, TensorFlow/Keras, OpenCV, NumPy, Pandas,
-Matplotlib, Seaborn, scikit-learn, Streamlit.
-
-**Dataset:** FER-2013 (Kaggle) — 35,887 grayscale 48×48 pixel face images,
-7 emotion classes.
-
-**Primary demo:** `python src/webcam.py` (real-time OpenCV window).
-""")
+# ── Main Entry Point ──────────────────────────────────────────────────
+if __name__ == "__main__":
+    demo.launch()
