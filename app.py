@@ -373,4 +373,4 @@ with gr.Blocks(title="Facial Emotion Recognition") as demo:
 
 # ── Main Entry Point ──────────────────────────────────────────────────
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(share=True)
