@@ -46,16 +46,27 @@ def find_cascade() -> str:
     return candidates[0]
 
 
-def detect_faces(image: np.ndarray, cascade_path: str = "") -> list[tuple[int, int, int, int]]:
-    """Detect faces in an image (BGR or grayscale). Returns list of (x, y, w, h)."""
+def detect_faces(
+    image: np.ndarray,
+    cascade_path: str = "",
+    margin: float = 0.1,
+    allow_fallback: bool = False,
+) -> list[tuple[int, int, int, int]]:
+    """
+    Detect faces in an image (BGR or grayscale). Returns list of (x, y, w, h).
+    Uses multi-stage cascade detection and optional padding margin.
+    """
     if image is None or image.size == 0:
         return []
+
+    h_img, w_img = image.shape[:2]
 
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         gray = image
 
+    faces = []
     try:
         if not cascade_path:
             cascade_path = find_cascade()
@@ -64,17 +75,40 @@ def detect_faces(image: np.ndarray, cascade_path: str = "") -> list[tuple[int, i
         if cascade_cls is not None and Path(cascade_path).exists():
             cascade = cascade_cls(str(cascade_path))
             if not cascade.empty():
-                faces = cascade.detectMultiScale(
-                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)
+                # Equalize grayscale for robust face detection in varying lighting
+                gray_eq = cv2.equalizeHist(gray)
+
+                # Pass 1: Standard detection on equalized grayscale
+                detected = cascade.detectMultiScale(
+                    gray_eq, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
                 )
-                if len(faces) > 0:
-                    return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
+                # Pass 2: Looser detection on raw grayscale if Pass 1 found nothing
+                if len(detected) == 0:
+                    detected = cascade.detectMultiScale(
+                        gray, scaleFactor=1.05, minNeighbors=3, minSize=(30, 30)
+                    )
+
+                if len(detected) > 0:
+                    for (x, y, w, h) in detected:
+                        if margin > 0:
+                            pad_w = int(w * margin)
+                            pad_h = int(h * margin)
+                            x_new = max(0, x - pad_w)
+                            y_new = max(0, y - pad_h)
+                            w_new = min(w_img - x_new, w + 2 * pad_w)
+                            h_new = min(h_img - y_new, h + 2 * pad_h)
+                            faces.append((int(x_new), int(y_new), int(w_new), int(h_new)))
+                        else:
+                            faces.append((int(x), int(y), int(w), int(h)))
+                    return faces
     except Exception as e:
         print(f"Warning in detect_faces: {e}")
 
-    # Fallback: if detection fails or finds 0 faces, treat full image as face region
-    h, w = gray.shape[:2]
-    return [(0, 0, w, h)]
+    # Fallback: if allow_fallback is True OR image is already a small cropped face (<= 180x180)
+    if allow_fallback or (w_img <= 180 and h_img <= 180):
+        return [(0, 0, w_img, h_img)]
+
+    return []
 
 
 def preprocess_face(face_bgr: np.ndarray) -> np.ndarray:

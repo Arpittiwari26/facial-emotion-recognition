@@ -165,18 +165,19 @@ with tab_upload:
 
             with col2:
                 st.subheader("Prediction")
+                allow_fallback = st.checkbox("Analyze full image if face detector finds 0 faces", value=False, key="up_fb")
                 model, err = get_model()
                 if err:
                     st.error(err)
                 else:
                     try:
-                        faces = detect_faces(image, CASCADE_PATH)
+                        faces = detect_faces(image, CASCADE_PATH, allow_fallback=allow_fallback)
 
                         if len(faces) == 0:
-                            st.warning("No face detected in the image.")
-                            st.info("Tips: Ensure the face is clearly visible, "
-                                    "well-lit, and facing forward. "
-                                    "The Haar cascade works best on frontal faces.")
+                            st.warning("⚠️ No face detected in the image.")
+                            st.info("💡 **Tips for best results:**\n"
+                                    "- Ensure your face is upright, well-lit, and facing forward.\n"
+                                    "- If you uploaded an image that is ALREADY a cropped face, check the box above: *'Analyze full image if face detector finds 0 faces'*.")
                         else:
                             annotated = image.copy()
                             results = []
@@ -310,15 +311,19 @@ with tab_webcam:
 
             with col2:
                 st.subheader("Prediction")
+                allow_fallback_cam = st.checkbox("Analyze full photo if face detector finds 0 faces", value=False, key="cam_fb")
                 model, err = get_model()
                 if err:
                     st.error(err)
                 else:
                     try:
-                        faces = detect_faces(image, CASCADE_PATH)
+                        faces = detect_faces(image, CASCADE_PATH, allow_fallback=allow_fallback_cam)
 
                         if len(faces) == 0:
-                            st.warning("No face detected in the photo.")
+                            st.warning("⚠️ No face detected in the photo.")
+                            st.info("💡 **Tips for best results:**\n"
+                                    "- Ensure your face is centered, upright, and well-lit.\n"
+                                    "- If face is not detected automatically, check *'Analyze full photo if face detector finds 0 faces'* above.")
                         else:
                             annotated = image.copy()
                             for i, (x, y, w, h) in enumerate(faces):
