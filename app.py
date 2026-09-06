@@ -20,6 +20,12 @@ import io
 import sys
 from pathlib import Path
 
+import cv2
+import numpy as np
+import streamlit as st
+import tensorflow as tf
+from PIL import Image
+
 # Ensure src/ is on the path so Streamlit can import src/* modules
 # when running from the project root (streamlit run app.py)
 _SCRIPT_DIR = Path(__file__).parent
