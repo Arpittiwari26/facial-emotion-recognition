@@ -191,7 +191,7 @@ def explain_prediction(
 
 class GradCAMExplainer:
     """
-    Wrapper class for Grad-CAM, providing a convenient interface for Streamlit app.
+    Wrapper class for Grad-CAM, providing a convenient interface for Gradio app.
 
     Usage:
         explainer = GradCAMExplainer(model)

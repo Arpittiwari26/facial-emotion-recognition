@@ -219,7 +219,7 @@ def train(
     history_dict = history.history if hasattr(history, "history") else history
     plot_training_history(history_dict, RESULTS_DIR / "training_history.png")
 
-    # Save history as JSON for later use (e.g., in Streamlit)
+    # Save history as JSON for later use (e.g., in Gradio app)
     import json
     with open(RESULTS_DIR / "training_history.json", "w") as f:
         json.dump(history_dict, f, indent=2)

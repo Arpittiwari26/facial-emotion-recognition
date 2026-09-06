@@ -287,22 +287,20 @@ Grad-CAM (Gradient-weighted Class Activation Mapping) produces a heatmap showing
 
 **Important caveat:** Grad-CAM shows *where the model looks*, not what biologically causes the emotion. A heatmap on the mouth for "Happy" means the model used mouth features for its decision — it does NOT prove the mouth causes happiness.
 
-## Streamlit Application (`app.py`)
+## Gradio Web Application (`app.py`)
 
 ```bash
-streamlit run app.py
+python app.py
 ```
 
-Opens `http://localhost:8501` with 4 tabs:
+Opens `http://127.0.0.1:7860` (and generates a free public `.gradio.live` link) with 4 tabs:
 
 | Tab | Function |
 |-----|----------|
-| 📸 Upload Image | Upload an image → face detection → emotion prediction with probability bars |
-| 🎥 Webcam | Browser-based camera capture (single photo prediction) |
-| 📊 Model Metrics | Confusion matrix, training plots, accuracy/F1/per-class metrics |
-| 🔍 Grad-CAM | Upload image → Grad-CAM heatmap + overlay for each face |
-
-The *primary* real-time experience is still `src/webcam.py` (OpenCV continuous video).
+| 🎥 Live Expression | Continuous browser webcam streaming with live emotion predictions & FPS |
+| 📸 Upload Image | Upload an image → face detection → emotion prediction with probability distribution |
+| 🔍 Grad-CAM | Upload image → Grad-CAM heatmap + overlay for face regions |
+| 📊 Model Metrics & System Info | Model architecture, test accuracy, FER-2013 dataset details |
 
 ## GPU Support
 
@@ -461,7 +459,7 @@ These are baselines — the project is about the complete pipeline and understan
 | Matplotlib | 3.11 | Training plots |
 | Seaborn | 0.13 | Confusion matrix visualization |
 | scikit-learn | 1.9 | Metrics (precision, recall, F1, confusion matrix) |
-| Streamlit | 1.63 | Web application |
+| Gradio | 6.26 | Web application |
 
 **No PyTorch** — this project uses TensorFlow/Keras exclusively.
 
