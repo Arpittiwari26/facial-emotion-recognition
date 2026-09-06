@@ -113,12 +113,16 @@ def detect_faces(
 
 def preprocess_face(face_bgr: np.ndarray) -> np.ndarray:
     """Resize to 48x48, grayscale, normalize to [0,1], add batch+channel dims."""
-    face_resized = cv2.resize(face_bgr, (IMG_SIZE, IMG_SIZE))
-    if len(face_resized.shape) == 3:
-        face_gray = cv2.cvtColor(face_resized, cv2.COLOR_BGR2GRAY)
+    if face_bgr is None or face_bgr.size == 0:
+        return np.zeros((1, IMG_SIZE, IMG_SIZE, 1), dtype=np.float32)
+
+    if len(face_bgr.shape) == 3:
+        face_gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
     else:
-        face_gray = face_resized
-    face_norm = face_gray.astype(np.float32) / 255.0
+        face_gray = face_bgr
+
+    face_resized = cv2.resize(face_gray, (IMG_SIZE, IMG_SIZE))
+    face_norm = face_resized.astype(np.float32) / 255.0
     return np.expand_dims(face_norm, axis=(0, -1))
 
 

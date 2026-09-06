@@ -108,7 +108,8 @@ with st.sidebar:
     """)
 
 
-# ── Load model (lazy, for upload/webcam tabs) ───────────────────────
+# ── Load model (cached in RAM for instant inference) ─────────────────
+@st.cache_resource
 def get_model():
     """Load model on demand. Returns (model, error_msg)."""
     if not MODEL_PATH.exists():
