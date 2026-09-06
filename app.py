@@ -27,14 +27,14 @@ _SRC_DIR = _SCRIPT_DIR / "src"
 if str(_SRC_DIR.resolve()) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR.resolve()))
 
-import cv2
-import numpy as np
-import streamlit as st
-import tensorflow as tf
-
-from model import EMOTION_LABELS, load_model
-from predict import detect_faces, preprocess_face, find_cascade
-from gradcam import GradCAMExplainer
+try:
+    from src.model import EMOTION_LABELS
+    from src.predict import detect_faces, preprocess_face, find_cascade
+    from src.gradcam import GradCAMExplainer
+except ModuleNotFoundError:
+    from model import EMOTION_LABELS
+    from predict import detect_faces, preprocess_face, find_cascade
+    from gradcam import GradCAMExplainer
 
 # ── Paths ────────────────────────────────────────────────────────────
 MODEL_PATH = Path("models/emotion_model.keras")

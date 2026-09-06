@@ -8,7 +8,6 @@ env/
 .venv/
 *.egg-info/
 *.egg
-models/*.keras
 results/
 dataset/*.npy
 dataset/*.csv
